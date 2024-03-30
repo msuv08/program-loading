@@ -8,7 +8,8 @@
 #include <sys/stat.h>
 #include <assert.h>
 
-#define STACK_SIZE (1024 * 1024)  // 1 MB Stack
+#define STACK_SIZE 20 * sysconf(_SC_PAGE_SIZE)
+#define START_ADDR (void *)0x30000000
 
 extern char **environ;
 
@@ -70,7 +71,6 @@ void load_elf(const char *filepath, Elf64_Addr *entry_point) {
         fprintf(stderr, "Invalid ELF file.\n");
         exit(EXIT_FAILURE);
     }
-
     // Save the entry point
     *entry_point = ehdr.e_entry;
     printf("Entry point: %lx\n", *entry_point);
@@ -120,74 +120,67 @@ void setup_stack_and_transfer_control(char **argv, Elf64_Addr entry_point) {
     char **envp = environ;
     int argc, envc;
 
-    // Calculate argc for argv
-    for (argc = 0; argv[argc] != NULL; argc++);
-    
     // Calculate envc for envp
     for (envc = 0; envp[envc] != NULL; envc++);
 
+    // Calculate argc for argv
+    for (argc = 0; argv[argc] != NULL; argc++);
+
+
     // Allocate stack for the child process
-    unsigned long *stack = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE,
+    unsigned long *stack = mmap(START_ADDR, STACK_SIZE, PROT_READ | PROT_WRITE,
                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (stack == MAP_FAILED) {
         perror("Failed to allocate stack");
         exit(EXIT_FAILURE);
     }
 
-    unsigned long *stack_top = stack + STACK_SIZE / sizeof(unsigned long);
+    printf("mmap call for stack: mmap(addr: %p, size: %ld)\n", START_ADDR, STACK_SIZE);
+    // Might be a good idea here to zero out the memory after??? Not sure
+
+    unsigned long *stack_top = START_ADDR + STACK_SIZE;
+    printf("Stack Top: %p\n", stack_top);
     // Align stack top to 16-byte boundary
-    stack_top = (unsigned long *)((uintptr_t)stack_top & -16L);
+    // stack_top = (unsigned long *)((uintptr_t)stack_top & -16L);
 
-    // Start placing items on the stack in reverse order
+    // Copy environment strings and pointers in reverse order to the stack
+    printf("envc: %d\n", envc);
+    for (int i = envc - 1; i >= 0; i--) {
+        size_t len = strlen(envp[i]) + 1; // Include NULL terminator
+        stack_top = (unsigned long *)((char *)stack_top - len);
+        memcpy(stack_top, envp[i], len);
+    }
+    printf("Stack Top After envc: %p\n", stack_top);
+
+    // Copy argv strings and pointers in reverse order to the stack
+    for (int i = argc - 1; i >= 0; i--) {
+        size_t len = strlen(argv[i]) + 1; // Include NULL terminator
+        stack_top = (unsigned long *)((char *)stack_top - len);
+        memcpy(stack_top, argv[i], len);
+    }
     
-    // Auxiliary vectors
-    Elf64_auxv_t *auxv = (Elf64_auxv_t *)(envp + envc + 1); // auxv is after envp
-    while (auxv->a_type != AT_NULL) { // Skip to end of auxv
-        auxv++;
-    }
-    // Copy auxiliary vectors in reverse order to the stack
-    do {
-        auxv--;
-        *--stack_top = auxv->a_un.a_val;
-        *--stack_top = auxv->a_type;
-    } while (auxv->a_type != AT_IGNORE);
+    printf("Stack Top after argv: %p\n", stack_top);
+    // Align stack top to 16-byte boundary
+    stack_top = (void *)((uintptr_t)stack_top & ~0xF);
+    printf("Stack Top after alignment: %p\n", stack_top);
 
-    // Terminate envp list
-    *--stack_top = 0;
-
-    // Copy environment pointers in reverse order to the stack
-    for (int i = envc; i >= 0; i--) {
-        *--stack_top = (unsigned long)envp[i];
-    }
-
-    // Terminate argv list
-    *--stack_top = 0;
-
-    // Copy argument pointers in reverse order to the stack
-    for (int i = argc; i >= 0; i--) {
-        *--stack_top = (unsigned long)argv[i];
-    }
-
-    // Finally, place argc at the very top of the stack
-    *--stack_top = argc;
-
-    stack_check(stack_top, argc, argv);
+    // Still need to push AUX vectors...
     
-    // Transfer control to the child program's entry point
-    asm volatile(
-        "mov %0, %%rsp\n"
-        "xor %%rax, %%rax\n"
-        "xor %%rbx, %%rbx\n"
-        "xor %%rcx, %%rcx\n"
-        "xor %%rdx, %%rdx\n"
-        "xor %%rdi, %%rdi\n"
-        "xor %%rsi, %%rsi\n"
-        "xor %%rbp, %%rbp\n"
-        "jmp *%1\n"
-        : // No output operands
-        : "r"(stack_top), "r"(entry_point)
-        : "memory"
-    );
+    // // Transfer control to the child program's entry point
+    // asm volatile(
+    //     "mov %0, %%rsp\n"
+    //     "xor %%rax, %%rax\n"
+    //     "xor %%rbx, %%rbx\n"
+    //     "xor %%rcx, %%rcx\n"
+    //     "xor %%rdx, %%rdx\n"
+    //     "xor %%rdi, %%rdi\n"
+    //     "xor %%rsi, %%rsi\n"
+    //     "xor %%rbp, %%rbp\n"
+    //     "jmp *%1\n"
+    //     : // No output operands
+    //     : "r"(stack_top), "r"(entry_point)
+    //     : "memory"
+    // );
 }
 
 int main(int argc, char *argv[]) {
