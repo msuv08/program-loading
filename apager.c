@@ -53,45 +53,60 @@ void stack_check(void* top_of_stack, uint64_t argc, char** argv) {
 }
 
 void load_elf(const char *filepath, Elf64_Addr *entry_point) {
+    // Open the ELF file
     int fd = open(filepath, O_RDONLY);
     if (fd < 0) {
         perror("Failed to open file");
         exit(EXIT_FAILURE);
     }
-
+    // Read in the ELF header
     Elf64_Ehdr ehdr;
     if (read(fd, &ehdr, sizeof(ehdr)) != sizeof(ehdr)) {
         perror("Failed to read ELF header");
         exit(EXIT_FAILURE);
     }
-
+    // Check if the file is a valid ELF file
     if (memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0 || ehdr.e_ident[EI_CLASS] != ELFCLASS64) {
         fprintf(stderr, "Invalid ELF file.\n");
         exit(EXIT_FAILURE);
     }
 
+    // Save the entry point
     *entry_point = ehdr.e_entry;
-
+    printf("Entry point: %lx\n", *entry_point);
+    // Read in the program headers
     Elf64_Phdr phdrs[ehdr.e_phnum];
     lseek(fd, ehdr.e_phoff, SEEK_SET);
     read(fd, phdrs, ehdr.e_phnum * sizeof(Elf64_Phdr));
+    
+    // save program header address??
 
     for (int i = 0; i < ehdr.e_phnum; ++i) {
         if (phdrs[i].p_type == PT_LOAD) {
+            // Map the segment into memory (if it is loadable)
             size_t offset = phdrs[i].p_vaddr % sysconf(_SC_PAGESIZE);
             void *segment = mmap((void *)(phdrs[i].p_vaddr - offset), 
                                  phdrs[i].p_memsz + offset, 
                                  PROT_READ | PROT_WRITE | PROT_EXEC, 
                                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            // Check if mmap was successful
             if (segment == MAP_FAILED) {
                 perror("Failed to map segment");
                 exit(EXIT_FAILURE);
             }
+            // Print out mmap call
+            printf("mmap call: mmap(addr: %p, size: %lu)\n", 
+                   (void *)(phdrs[i].p_vaddr - offset), 
+                   phdrs[i].p_memsz + offset);
+
+            // Load the segment from the file into memory
             lseek(fd, phdrs[i].p_offset, SEEK_SET);
             if (read(fd, segment + offset, phdrs[i].p_filesz) != phdrs[i].p_filesz) {
                 perror("Failed to read segment from file");
                 exit(EXIT_FAILURE);
             }
+
+            // Zero out the memory region that was not loaded from the file
             if (phdrs[i].p_memsz > phdrs[i].p_filesz) {
                 memset(segment + offset + phdrs[i].p_filesz, 0, phdrs[i].p_memsz - phdrs[i].p_filesz);
             }
