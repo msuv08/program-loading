@@ -164,8 +164,29 @@ void setup_stack_and_transfer_control(char **argv, Elf64_Addr entry_point) {
     stack_top = (void *)((uintptr_t)stack_top & ~0xF);
     printf("Stack Top after alignment: %p\n", stack_top);
 
+    // stack_check(stack_top, argc, argv);
     // Still need to push AUX vectors...
+
+    // Iterate through the env variables to find start of AUX vectors
+    for(int i = 0; i < envc & *envp!=NULL; i++){
+        envp++;
+    }
+    envp++;
+
+    printf("envp: %ld\n",(uint64_t)envp);
     
+    Elf64_auxv_t *auxv = (Elf64_auxv_t *)envp;
+    int aux_num = 0;
+    
+    while (auxv->a_type != AT_NULL) {
+        aux_num++;
+        auxv++;
+    }
+    aux_num++;
+    printf("aux_num: %d\n", aux_num);
+
+
+
     // // Transfer control to the child program's entry point
     // asm volatile(
     //     "mov %0, %%rsp\n"
@@ -181,6 +202,7 @@ void setup_stack_and_transfer_control(char **argv, Elf64_Addr entry_point) {
     //     : "r"(stack_top), "r"(entry_point)
     //     : "memory"
     // );
+    
 }
 
 int main(int argc, char *argv[]) {
