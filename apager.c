@@ -102,40 +102,64 @@ void load_elf(const char *filepath, Elf64_Addr *entry_point) {
 }
 
 void setup_stack_and_transfer_control(char **argv, Elf64_Addr entry_point) {
-    unsigned long *stack;
     char **envp = environ;
     int argc, envc;
 
+    // Calculate argc for argv
     for (argc = 0; argv[argc] != NULL; argc++);
+    
+    // Calculate envc for envp
     for (envc = 0; envp[envc] != NULL; envc++);
 
-    stack = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    // Allocate stack for the child process
+    unsigned long *stack = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (stack == MAP_FAILED) {
         perror("Failed to allocate stack");
         exit(EXIT_FAILURE);
     }
 
-    unsigned long *stack_top = stack + STACK_SIZE / sizeof(unsigned long) - 1;
-    stack_top = (unsigned long *)((uintptr_t)stack_top & -16L); // Align to 16 bytes
+    unsigned long *stack_top = stack + STACK_SIZE / sizeof(unsigned long);
+    // Align stack top to 16-byte boundary
+    stack_top = (unsigned long *)((uintptr_t)stack_top & -16L);
 
-    // Environment and arguments are pushed onto the stack in reverse order
-    stack_top[0] = 0; // NULL terminator for envp
-    for (int i = envc; i > 0; i--) {
-        stack_top--;
-        stack_top[0] = (unsigned long)envp[i - 1];
+    // Start placing items on the stack in reverse order
+    
+    // Auxiliary vectors
+    Elf64_auxv_t *auxv = (Elf64_auxv_t *)(envp + envc + 1); // auxv is after envp
+    while (auxv->a_type != AT_NULL) { // Skip to end of auxv
+        auxv++;
     }
-    stack_top[0] = 0; // NULL terminator for argv
-    for (int i = argc; i > 0; i--) {
-        stack_top--;
-        stack_top[0] = (unsigned long)argv[i - 1];
+    // Copy auxiliary vectors in reverse order to the stack
+    do {
+        auxv--;
+        *--stack_top = auxv->a_un.a_val;
+        *--stack_top = auxv->a_type;
+    } while (auxv->a_type != AT_IGNORE);
+
+    // Terminate envp list
+    *--stack_top = 0;
+
+    // Copy environment pointers in reverse order to the stack
+    for (int i = envc; i >= 0; i--) {
+        *--stack_top = (unsigned long)envp[i];
     }
-    stack_top--;
-    *stack_top = argc; // argc
+
+    // Terminate argv list
+    *--stack_top = 0;
+
+    // Copy argument pointers in reverse order to the stack
+    for (int i = argc; i >= 0; i--) {
+        *--stack_top = (unsigned long)argv[i];
+    }
+
+    // Finally, place argc at the very top of the stack
+    *--stack_top = argc;
 
     stack_check(stack_top, argc, argv);
-
-    // Transfer control to the loaded program's entry point
-    asm volatile (
+    
+    // Transfer control to the child program's entry point
+    asm volatile(
         "mov %0, %%rsp\n"
         "xor %%rax, %%rax\n"
         "xor %%rbx, %%rbx\n"
@@ -144,11 +168,8 @@ void setup_stack_and_transfer_control(char **argv, Elf64_Addr entry_point) {
         "xor %%rdi, %%rdi\n"
         "xor %%rsi, %%rsi\n"
         "xor %%rbp, %%rbp\n"
-        "pop %%rdi\n"          // argc
-        "mov %%rsp, %%rsi\n"   // argv
-        "add $8, %%rsi\n"      // Skip argc on the stack to get argv
-        "jmp *%1\n"            // Jump to the entry point
-        :
+        "jmp *%1\n"
+        : // No output operands
         : "r"(stack_top), "r"(entry_point)
         : "memory"
     );
