@@ -12,6 +12,10 @@
 #define START_ADDR (void *)0x30000000
 
 extern char **environ;
+Elf64_Addr global_e_entry;
+Elf64_Addr global_phead_address;
+uint16_t global_e_phnum;
+uint16_t global_e_phentsize;
 
 /**
  * Routine for checking stack made for child program.
@@ -78,6 +82,15 @@ void load_elf(const char *filepath, Elf64_Addr *entry_point) {
     Elf64_Phdr phdrs[ehdr.e_phnum];
     lseek(fd, ehdr.e_phoff, SEEK_SET);
     read(fd, phdrs, ehdr.e_phnum * sizeof(Elf64_Phdr));
+
+    // Save the global variables
+    global_e_entry = ehdr.e_entry;
+    global_e_phnum = ehdr.e_phnum;
+    global_e_phentsize = ehdr.e_phentsize;
+
+    if (ehdr.e_phnum != 0) {
+        global_phead_address = (Elf64_Addr)phdrs[0].p_vaddr + ehdr.e_phoff;
+    }
     
     // save program header address??
 
@@ -158,7 +171,7 @@ void setup_stack_and_transfer_control(char **argv, Elf64_Addr entry_point) {
         stack_top = (unsigned long *)((char *)stack_top - len);
         memcpy(stack_top, argv[i], len);
     }
-    
+
     printf("Stack Top after argv: %p\n", stack_top);
     // Align stack top to 16-byte boundary
     stack_top = (void *)((uintptr_t)stack_top & ~0xF);
@@ -177,14 +190,52 @@ void setup_stack_and_transfer_control(char **argv, Elf64_Addr entry_point) {
     
     Elf64_auxv_t *auxv = (Elf64_auxv_t *)envp;
     int aux_num = 0;
-    
-    while (auxv->a_type != AT_NULL) {
+
+    while (auxv[aux_num].a_type != AT_NULL) {
         aux_num++;
-        auxv++;
     }
     aux_num++;
+    
     printf("aux_num: %d\n", aux_num);
 
+    // Allocate space for the auxiliary vector, plus one for the AT_NULL terminator
+    Elf64_auxv_t *aux_vectors_list = calloc(aux_num+1, sizeof(Elf64_auxv_t));
+
+    // Copy and modify the auxiliary vector
+    for (int i = 0; i < aux_num; i++) {
+        aux_vectors_list[i] = auxv[i]; // Shallow copy is sufficient
+        switch (aux_vectors_list[i].a_type) {
+            case AT_NULL:
+                // printf("i: %d\n", i);
+                aux_vectors_list[i+1].a_un.a_val = 0;
+                aux_vectors_list[i+1].a_type = AT_NULL;
+                break;
+            case AT_PHNUM:
+                aux_vectors_list[i].a_un.a_val = global_e_phnum;
+                break;
+            case AT_PHENT:
+                aux_vectors_list[i].a_un.a_val = global_e_phentsize;
+                break;
+            case AT_PHDR:
+                aux_vectors_list[i].a_un.a_val = (Elf64_Addr)global_phead_address;
+                break;
+            case AT_ENTRY:
+                aux_vectors_list[i].a_un.a_val = global_e_entry;
+                break;
+            // No default case needed; other types are copied without modification
+        }
+        // printf("Aux Vector Element %d", i);
+        // printf(" Type: %ld\n", aux_vector[i].a_type);
+    }
+    printf("length of aux_vector: %d\n", aux_num);
+    // Adjust the stack pointer to make space for the auxiliary vector
+    stack_top = (void *)((uintptr_t)stack_top - (aux_num * sizeof(Elf64_auxv_t)));
+    printf("Stack top after adjusting for auxilary vector space: %p\n", stack_top);
+    // Adjust the stack pointer to make space for envc
+    stack_top = (void *)((uintptr_t)stack_top - (envc * sizeof(uintptr_t)));
+    printf("Stack top after envc: %p\n", stack_top);
+    // Align stack top to 16-byte boundary
+    stack_top = (void *)((uintptr_t)stack_top & ~0xF);
 
 
     // // Transfer control to the child program's entry point
