@@ -9,13 +9,12 @@
 #include <assert.h>
 
 #define STACK_SIZE 20 * sysconf(_SC_PAGE_SIZE)
-#define START_ADDR (void *)0x30000000
+#define START_ADDR (void *)0x500000
 
+// Define the environment variable
 extern char **environ;
 Elf64_Addr global_e_entry;
-Elf64_Addr global_phead_address;
-uint16_t global_e_phnum;
-uint16_t global_e_phentsize;
+
 
 /**
  * Routine for checking stack made for child program.
@@ -83,16 +82,8 @@ void load_elf(const char *filepath, Elf64_Addr *entry_point) {
     lseek(fd, ehdr.e_phoff, SEEK_SET);
     read(fd, phdrs, ehdr.e_phnum * sizeof(Elf64_Phdr));
 
-    // Save the global variables
+    // Save the global entry ???
     global_e_entry = ehdr.e_entry;
-    global_e_phnum = ehdr.e_phnum;
-    global_e_phentsize = ehdr.e_phentsize;
-
-    if (ehdr.e_phnum != 0) {
-        global_phead_address = (Elf64_Addr)phdrs[0].p_vaddr + ehdr.e_phoff;
-    }
-    
-    // save program header address??
 
     for (int i = 0; i < ehdr.e_phnum; ++i) {
         if (phdrs[i].p_type == PT_LOAD) {
@@ -129,19 +120,22 @@ void load_elf(const char *filepath, Elf64_Addr *entry_point) {
     close(fd);
 }
 
-void setup_stack_and_transfer_control(char **argv, Elf64_Addr entry_point) {
+void setup_stack(void **top_of_stack_ptr, char **argv, Elf64_Addr entry_point) {
     char **envp = environ;
-    int argc, envc;
+    int argc, envc, argv_len, envc_len;
 
-    // Calculate envc for envp
-    for (envc = 0; envp[envc] != NULL; envc++);
+    // Calculate envc for envp and envc_len
+    for (envc = 0, envc_len = 0; envp[envc] != NULL; envc++) {
+        envc_len += strlen(envp[envc]) + 1;
+    }
 
-    // Calculate argc for argv
-    for (argc = 0; argv[argc] != NULL; argc++);
-
+    // Calculate argc for argv and argv_len
+    for (argc = 0, argv_len = 0; argv[argc] != NULL; argc++) {
+        argv_len += strlen(argv[argc]) + 1;
+    }
 
     // Allocate stack for the child process
-    unsigned long *stack = mmap(START_ADDR, STACK_SIZE, PROT_READ | PROT_WRITE,
+    void *stack = mmap(START_ADDR, STACK_SIZE, PROT_READ | PROT_WRITE,
                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (stack == MAP_FAILED) {
         perror("Failed to allocate stack");
@@ -151,42 +145,40 @@ void setup_stack_and_transfer_control(char **argv, Elf64_Addr entry_point) {
     printf("mmap call for stack: mmap(addr: %p, size: %ld)\n", START_ADDR, STACK_SIZE);
     // Might be a good idea here to zero out the memory after??? Not sure
 
-    unsigned long *stack_top = START_ADDR + STACK_SIZE;
-    printf("Stack Top: %p\n", stack_top);
+    void *stack_top = START_ADDR + STACK_SIZE;
     // Align stack top to 16-byte boundary
-    // stack_top = (unsigned long *)((uintptr_t)stack_top & -16L);
+    stack_top = (void *)((uintptr_t)stack_top & -16L);
+    printf("Stack Top After Alignment: %p\n", stack_top);\
 
+    // Calculate the stack pointer locations for envc and argv
+    char *stack_past_envc = (char *)stack_top - envc_len;
+    char *stack_past_argv = (char *)stack_past_envc - argv_len;
     // Copy environment strings and pointers in reverse order to the stack
-    printf("envc: %d\n", envc);
-    for (int i = envc - 1; i >= 0; i--) {
-        size_t len = strlen(envp[i]) + 1; // Include NULL terminator
-        stack_top = (unsigned long *)((char *)stack_top - len);
-        memcpy(stack_top, envp[i], len);
-    }
-    printf("Stack Top After envc: %p\n", stack_top);
+    int envc_ctr = envc - 1;
 
-    // Copy argv strings and pointers in reverse order to the stack
-    for (int i = argc - 1; i >= 0; i--) {
-        size_t len = strlen(argv[i]) + 1; // Include NULL terminator
-        stack_top = (unsigned long *)((char *)stack_top - len);
-        memcpy(stack_top, argv[i], len);
+    while(envp[envc_ctr] != NULL) {
+        size_t len = strlen(envp[envc_ctr]) + 1; // Include NULL terminator
+        stack_top = ((char *) stack_top) - len;;
+        memcpy(stack_top, envp[envc_ctr], len);
+        envc_ctr--;
     }
 
-    printf("Stack Top after argv: %p\n", stack_top);
+    // Copy argv string and pointer to the stack (only one needed, just one program being loaded)
+    // printf("argv[argv_ctr]: %s\n", argv[argc - 1]);
+    size_t len = strlen(argv[argc - 1]) + 1; // Include NULL terminator
+    stack_top = ((char *) stack_top) - len;
+    memcpy(stack_top, argv[argc - 1], len);
+    // strcpy((char *)stack_top, argv[argc - 1]);
+
     // Align stack top to 16-byte boundary
-    stack_top = (void *)((uintptr_t)stack_top & ~0xF);
-    printf("Stack Top after alignment: %p\n", stack_top);
-
-    // stack_check(stack_top, argc, argv);
-    // Still need to push AUX vectors...
+    stack_top = (unsigned long *)((unsigned long)(stack_top) & ~0xf);
+    // printf("Stack Top after alignment: %p\n", stack_top);
 
     // Iterate through the env variables to find start of AUX vectors
     for(int i = 0; i < envc & *envp!=NULL; i++){
         envp++;
     }
-    envp++;
-
-    printf("envp: %ld\n",(uint64_t)envp);
+    envp++; // Slide past the NULL terminator
     
     Elf64_auxv_t *auxv = (Elf64_auxv_t *)envp;
     int aux_num = 0;
@@ -201,59 +193,67 @@ void setup_stack_and_transfer_control(char **argv, Elf64_Addr entry_point) {
     // Allocate space for the auxiliary vector, plus one for the AT_NULL terminator
     Elf64_auxv_t *aux_vectors_list = calloc(aux_num+1, sizeof(Elf64_auxv_t));
 
-    // Copy and modify the auxiliary vector
+    // Copy in the auxiliary vector
     for (int i = 0; i < aux_num; i++) {
-        aux_vectors_list[i] = auxv[i]; // Shallow copy is sufficient
-        switch (aux_vectors_list[i].a_type) {
-            case AT_NULL:
-                // printf("i: %d\n", i);
-                aux_vectors_list[i+1].a_un.a_val = 0;
-                aux_vectors_list[i+1].a_type = AT_NULL;
-                break;
-            case AT_PHNUM:
-                aux_vectors_list[i].a_un.a_val = global_e_phnum;
-                break;
-            case AT_PHENT:
-                aux_vectors_list[i].a_un.a_val = global_e_phentsize;
-                break;
-            case AT_PHDR:
-                aux_vectors_list[i].a_un.a_val = (Elf64_Addr)global_phead_address;
-                break;
-            case AT_ENTRY:
-                aux_vectors_list[i].a_un.a_val = global_e_entry;
-                break;
-            // No default case needed; other types are copied without modification
-        }
+        aux_vectors_list[i] = auxv[i];
         // printf("Aux Vector Element %d", i);
         // printf(" Type: %ld\n", aux_vector[i].a_type);
     }
-    printf("length of aux_vector: %d\n", aux_num);
-    // Adjust the stack pointer to make space for the auxiliary vector
-    stack_top = (void *)((uintptr_t)stack_top - (aux_num * sizeof(Elf64_auxv_t)));
-    printf("Stack top after adjusting for auxilary vector space: %p\n", stack_top);
-    // Adjust the stack pointer to make space for envc
-    stack_top = (void *)((uintptr_t)stack_top - (envc * sizeof(uintptr_t)));
-    printf("Stack top after envc: %p\n", stack_top);
+    // printf("length of aux_vector: %d\n", aux_num);
+
+    // Adjust the stack pointer to make space for the auxiliary vectors
+    size_t total_aux_vector_space = aux_num * sizeof(Elf64_auxv_t);
+    stack_top = stack_top - total_aux_vector_space;
+	
+    // Adjust the stack pointer to make space for argc and argv
+    size_t total_envc_and_argv_space = argv_len + envc_len;
+    stack_top = stack_top - total_envc_and_argv_space;
+
     // Align stack top to 16-byte boundary
-    stack_top = (void *)((uintptr_t)stack_top & ~0xF);
+    stack_top = (void *)((uint64_t)stack_top & -16L);
+	*top_of_stack_ptr = (void *)stack_top;
+	// Load in the argc, argv, envp, and aux vectors
+    memcpy(stack_top, &argc, sizeof(argc)); // Copy the value of argc into the stack first
+    stack_top += sizeof(argc) * 2; // Align to 8 bits
 
+    // Copy the address of argv into the stack
+    memcpy(stack_top, &stack_past_argv, sizeof(stack_past_argv));
+    stack_top += sizeof(stack_past_argv) * 2; // Align to 8 bits
 
-    // // Transfer control to the child program's entry point
-    // asm volatile(
-    //     "mov %0, %%rsp\n"
-    //     "xor %%rax, %%rax\n"
-    //     "xor %%rbx, %%rbx\n"
-    //     "xor %%rcx, %%rcx\n"
-    //     "xor %%rdx, %%rdx\n"
-    //     "xor %%rdi, %%rdi\n"
-    //     "xor %%rsi, %%rsi\n"
-    //     "xor %%rbp, %%rbp\n"
-    //     "jmp *%1\n"
-    //     : // No output operands
-    //     : "r"(stack_top), "r"(entry_point)
-    //     : "memory"
-    // );
-    
+    // Copy the addresses of envp into the stack (but not NULL terminator)
+    envc_ctr = 0; // Reset counter from earlier
+    while (envc_ctr < envc - 1) {
+        // Grab each env variable and copy it to the stack
+        memcpy(stack_top, &stack_past_envc, sizeof(stack_past_envc));
+        stack_top += sizeof(stack_past_envc);
+        envc_ctr++;
+    }
+	stack_top += sizeof(stack_past_envc); // Align to 8 bits
+
+    // Copy the address of the aux vectors into the stack
+	memcpy(stack_top, aux_vectors_list, total_aux_vector_space);
+
+    // Align stack top to 16-byte boundary
+    stack_top += total_aux_vector_space;
+    // Finally, run stack check to verify the stack is set up correctly
+    stack_check(*top_of_stack_ptr, argc, argv);
+}
+
+void transfer_control(void *top_of_stack, Elf64_Addr entry_point) {
+    // Transfer control to the entry point
+    __asm__ volatile (
+        "xor %%rax, %%rax\n\t" // Clear rax
+        "xor %%rbx, %%rbx\n\t" // Clear rbx
+        "xor %%rcx, %%rcx\n\t" // Clear rcx
+        "xor %%rdx, %%rdx\n\t" // Clear rdx
+        "mov %0, %%rsp\n\t" // Set up the stack pointer with the desired stack address
+        "mov %1, %%rax\n\t" // Move the target address into rax
+        "push %%rax\n\t"    // Push the target address onto the stack
+        "ret"               // Return, popping the target address off the stack and jumping to it
+        :
+        : "r" (top_of_stack), "r" (global_e_entry)
+        : "rax", "rbx", "rcx", "rdx", "memory"
+    );
 }
 
 int main(int argc, char *argv[]) {
@@ -263,9 +263,12 @@ int main(int argc, char *argv[]) {
     }
 
     Elf64_Addr entry_point;
-    load_elf(argv[1], &entry_point);
-    setup_stack_and_transfer_control(argv, entry_point);
+    void *top_of_loaded_stack;
 
-    // Should never reach here
+    load_elf(argv[1], &entry_point);
+    setup_stack(&top_of_loaded_stack, &argv[1], entry_point);
+    transfer_control(top_of_loaded_stack, entry_point);
+    
+    // SHOULD NOT REACH HERE!!!
     return 0;
 }
