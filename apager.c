@@ -148,7 +148,6 @@ void setup_stack(void **top_of_stack_ptr, char **argv, Elf64_Addr entry_point) {
     void *stack_top = START_ADDR + STACK_SIZE;
     // Align stack top to 16-byte boundary
     stack_top = (void *)((uintptr_t)stack_top & -16L);
-    printf("Stack Top After Alignment: %p\n", stack_top);\
 
     // Calculate the stack pointer locations for envc and argv
     char *stack_past_envc = (char *)stack_top - envc_len;
@@ -187,8 +186,6 @@ void setup_stack(void **top_of_stack_ptr, char **argv, Elf64_Addr entry_point) {
         aux_num++;
     }
     aux_num++;
-    
-    printf("aux_num: %d\n", aux_num);
 
     // Allocate space for the auxiliary vector, plus one for the AT_NULL terminator
     Elf64_auxv_t *aux_vectors_list = calloc(aux_num+1, sizeof(Elf64_auxv_t));
@@ -212,6 +209,7 @@ void setup_stack(void **top_of_stack_ptr, char **argv, Elf64_Addr entry_point) {
     // Align stack top to 16-byte boundary
     stack_top = (void *)((uint64_t)stack_top & -16L);
 	*top_of_stack_ptr = (void *)stack_top;
+    
 	// Load in the argc, argv, envp, and aux vectors
     memcpy(stack_top, &argc, sizeof(argc)); // Copy the value of argc into the stack first
     stack_top += sizeof(argc) * 2; // Align to 8 bits
