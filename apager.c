@@ -120,6 +120,40 @@ void load_elf(const char *filepath, Elf64_Addr *entry_point) {
     close(fd);
 }
 
+void print_stack_image(int argc, char **argv) {
+    printf("----- Detailed Stack Image -----\n");
+
+    // Using fixed width for each column
+    printf("| %-15s | %-40s |\n", "Address", "Content");
+    printf("|-----------------|------------------------------------------|\n");
+    
+    // Printing argc
+    printf("| %-15s | %-40d |\n", "argc", argc);
+    
+    // Printing argv entries
+    for (int i = 0; i < argc; i++) {
+        char addrBuffer[17] = {0}; // For holding the address as string
+        snprintf(addrBuffer, sizeof(addrBuffer), "argv[%d]", i);
+        char contentBuffer[41] = {0}; // For holding the content with a limit
+        snprintf(contentBuffer, sizeof(contentBuffer), "%p -> %.30s", (void*)argv[i], argv[i]);
+        printf("| %-15s | %-40s |\n", addrBuffer, contentBuffer);
+    }
+    
+    // Marking end of argv
+    printf("| %-15s | %-40p |\n", "argv[argc]", (void*)argv[argc]);
+    
+    // Printing environment variables
+    for (int i = 0; environ[i] != NULL; i++) {
+        char addrBuffer[17] = {0};
+        snprintf(addrBuffer, sizeof(addrBuffer), "env[%d]", i);
+        char contentBuffer[41] = {0};
+        snprintf(contentBuffer, sizeof(contentBuffer), "%p -> %.30s", (void*)environ[i], environ[i]);
+        printf("| %-15s | %-40s |\n", addrBuffer, contentBuffer);
+    }
+
+    printf("------------------------------------------------------------\n");
+}
+
 void setup_stack(void **top_of_stack_ptr, char **argv, Elf64_Addr entry_point) {
     char **envp = environ;
     int argc, envc, argv_len, envc_len;
@@ -209,7 +243,7 @@ void setup_stack(void **top_of_stack_ptr, char **argv, Elf64_Addr entry_point) {
     // Align stack top to 16-byte boundary
     stack_top = (void *)((uint64_t)stack_top & -16L);
 	*top_of_stack_ptr = (void *)stack_top;
-    
+
 	// Load in the argc, argv, envp, and aux vectors
     memcpy(stack_top, &argc, sizeof(argc)); // Copy the value of argc into the stack first
     stack_top += sizeof(argc) * 2; // Align to 8 bits
@@ -235,6 +269,8 @@ void setup_stack(void **top_of_stack_ptr, char **argv, Elf64_Addr entry_point) {
     stack_top += total_aux_vector_space;
     // Finally, run stack check to verify the stack is set up correctly
     stack_check(*top_of_stack_ptr, argc, argv);
+    // Print the stack image (debug output)
+    // print_stack_image(argc, argv);
 }
 
 void transfer_control(void *top_of_stack, Elf64_Addr entry_point) {
