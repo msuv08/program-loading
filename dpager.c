@@ -6,14 +6,80 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <signal.h>
+#include <ucontext.h>
 #include <assert.h>
 
 #define STACK_SIZE 20 * sysconf(_SC_PAGE_SIZE)
 #define START_ADDR (void *)0x500000
-
-// Define the environment variable
 extern char **environ;
 Elf64_Addr global_e_entry;
+int elf_fd = -1;
+
+typedef struct {
+    void *segment_start;
+    size_t segment_size;
+    off_t file_offset;
+    size_t file_size;
+} ElfSegment;
+
+ElfSegment loadable_segments[128];
+size_t num_loadable_segments = 0;
+
+void segfault_handler(int sig, siginfo_t *info, void *unused) {
+    void *fault_address = info->si_addr;
+    size_t page_size = sysconf(_SC_PAGESIZE);
+    void *page_start = (void *)((uintptr_t)fault_address & ~(page_size - 1));
+
+    for (size_t i = 0; i < num_loadable_segments; i++) {
+        ElfSegment *seg = &loadable_segments[i];
+        if (fault_address >= seg->segment_start && fault_address < (seg->segment_start + seg->segment_size) && seg->file_size > 0) {
+            off_t segment_page_offset = (uintptr_t)fault_address - (uintptr_t)seg->segment_start;
+            off_t file_page_offset = seg->file_offset + segment_page_offset;
+
+            // Align the file offset to the nearest page boundary
+            off_t aligned_file_page_offset = file_page_offset & ~(page_size - 1);
+
+            // Determine the size to read: either a full page or the remainder of the segment.
+            size_t size_to_map = page_size;
+            if (seg->file_size < segment_page_offset + page_size) {
+                size_to_map = seg->file_size - segment_page_offset;
+                size_to_map = ((size_to_map + page_size - 1) / page_size) * page_size; // Round up to the nearest page size
+            }
+
+            // Attempt to map the page into memory
+            void *mapped = mmap(page_start, page_size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                                MAP_PRIVATE | MAP_FIXED, elf_fd, aligned_file_page_offset);
+
+            if (mapped == MAP_FAILED) {
+                perror("Demand paging failed");
+                exit(EXIT_FAILURE);
+            }
+
+            // If this page extends beyond the file size, zero the remainder
+            if (size_to_map < page_size) {
+                memset((char *)mapped + size_to_map, 0, page_size - size_to_map);
+            }
+
+            return; // Successfully handled the page fault
+        }
+    }
+
+    // If the address is not within any loadable segment
+    fprintf(stderr, "Segmentation fault at address: %p\n", fault_address);
+    exit(EXIT_FAILURE);
+}
+
+void setup_signal_handling() {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = segfault_handler;
+    if (sigaction(SIGSEGV, &sa, NULL) != 0) {
+        perror("Failed to setup signal handler");
+        exit(EXIT_FAILURE);
+    }
+}
 
 void load_elf(const char *filepath, Elf64_Addr *entry_point) {
     // Open the ELF file
@@ -35,48 +101,30 @@ void load_elf(const char *filepath, Elf64_Addr *entry_point) {
     }
     // Save the entry point
     *entry_point = ehdr.e_entry;
-    printf("Entry point: %lx\n", *entry_point);
+    // printf("Entry point: %lx\n", *entry_point);
+
     // Read in the program headers
     Elf64_Phdr phdrs[ehdr.e_phnum];
-    lseek(fd, ehdr.e_phoff, SEEK_SET);
-    read(fd, phdrs, ehdr.e_phnum * sizeof(Elf64_Phdr));
-
-    // Save the global entry ???
-    global_e_entry = ehdr.e_entry;
-
+    lseek(elf_fd, ehdr.e_phoff, SEEK_SET);
+    if (read(elf_fd, phdrs, sizeof(Elf64_Phdr) * ehdr.e_phnum) != sizeof(Elf64_Phdr) * ehdr.e_phnum) {
+        perror("Failed to read program headers");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Map the segments into memory (if they are loadable)    
     for (int i = 0; i < ehdr.e_phnum; ++i) {
         if (phdrs[i].p_type == PT_LOAD) {
-            // Map the segment into memory (if it is loadable)
+            // Put loadable segments into the array
+            ElfSegment *seg = &loadable_segments[num_loadable_segments++];
+            // Calculate the offset of the segment within the file
             size_t offset = phdrs[i].p_vaddr % sysconf(_SC_PAGESIZE);
-            void *segment = mmap((void *)(phdrs[i].p_vaddr - offset), 
-                                 phdrs[i].p_memsz + offset, 
-                                 PROT_READ | PROT_WRITE | PROT_EXEC, 
-                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            // Check if mmap was successful
-            if (segment == MAP_FAILED) {
-                perror("Failed to map segment");
-                exit(EXIT_FAILURE);
-            }
-            // Print out mmap call
-            printf("mmap call: mmap(addr: %p, size: %lu)\n", 
-                   (void *)(phdrs[i].p_vaddr - offset), 
-                   phdrs[i].p_memsz + offset);
-
-            // Load the segment from the file into memory
-            lseek(fd, phdrs[i].p_offset, SEEK_SET);
-            if (read(fd, segment + offset, phdrs[i].p_filesz) != phdrs[i].p_filesz) {
-                perror("Failed to read segment from file");
-                exit(EXIT_FAILURE);
-            }
-
-            // Zero out the memory region that was not loaded from the file
-            if (phdrs[i].p_memsz > phdrs[i].p_filesz) {
-                memset(segment + offset + phdrs[i].p_filesz, 0, phdrs[i].p_memsz - phdrs[i].p_filesz);
-            }
+            // Assign the segment information
+            seg->segment_start = (void *)phdrs[i].p_vaddr - offset;
+            seg->segment_size = phdrs[i].p_memsz + offset;
+            seg->file_offset = phdrs[i].p_offset - offset;
+            seg->file_size = phdrs[i].p_filesz;
         }
     }
-
-    close(fd);
 }
 
 void print_stack_image(int argc, char **argv) {
@@ -120,37 +168,37 @@ void print_stack_image(int argc, char **argv) {
  * argv: Expected argument strings
  */
 void stack_check(void* top_of_stack, uint64_t argc, char** argv) {
-	printf("----- stack check -----\n");
+    printf("----- stack check -----\n");
 
-	assert(((uint64_t)top_of_stack) % 8 == 0);
-	printf("top of stack is 8-byte aligned\n");
+    assert(((uint64_t)top_of_stack) % 8 == 0);
+    printf("top of stack is 8-byte aligned\n");
 
-	uint64_t* stack = top_of_stack;
-	uint64_t actual_argc = *(stack++);
-	printf("argc: %lu\n", actual_argc);
-	assert(actual_argc == argc);
+    uint64_t* stack = top_of_stack;
+    uint64_t actual_argc = *(stack++);
+    printf("argc: %lu\n", actual_argc);
+    assert(actual_argc == argc);
 
-	for (int i = 0; i < argc; i++) {
-		char* argp = (char*)*(stack++);
-		assert(strcmp(argp, argv[i]) == 0);
-		printf("arg %d: %s\n", i, argp);
-	}
-	// Argument list ends with null pointer
-	assert(*(stack++) == 0);
+    for (int i = 0; i < argc; i++) {
+        char* argp = (char*)*(stack++);
+        assert(strcmp(argp, argv[i]) == 0);
+        printf("arg %d: %s\n", i, argp);
+    }
+    // Argument list ends with null pointer
+    assert(*(stack++) == 0);
 
-	int envp_count = 0;
-	while (*(stack++) != 0)
-		envp_count++;
+    int envp_count = 0;
+    while (*(stack++) != 0)
+        envp_count++;
 
-	printf("env count: %d\n", envp_count);
+    printf("env count: %d\n", envp_count);
 
-	Elf64_auxv_t* auxv_start = (Elf64_auxv_t*)stack;
-	Elf64_auxv_t* auxv_null = auxv_start;
-	while (auxv_null->a_type != AT_NULL) {
-		auxv_null++;
-	}
-	printf("aux count: %lu\n", auxv_null - auxv_start);
-	printf("----- end stack check -----\n");
+    Elf64_auxv_t* auxv_start = (Elf64_auxv_t*)stack;
+    Elf64_auxv_t* auxv_null = auxv_start;
+    while (auxv_null->a_type != AT_NULL) {
+        auxv_null++;
+    }
+    printf("aux count: %lu\n", auxv_null - auxv_start);
+    printf("----- end stack check -----\n");
 }
 
 void setup_stack(void **top_of_stack_ptr, char **argv, Elf64_Addr entry_point) {
@@ -294,7 +342,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Usage: %s <ELF file>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
-
+    setup_signal_handling(); // Setup signal handler for segfaults
     Elf64_Addr entry_point;
     void *top_of_loaded_stack;
 
