@@ -34,7 +34,8 @@ void load_elf(const char *filepath, Elf64_Addr *entry_point) {
     }
     // Save the entry point
     *entry_point = ehdr.e_entry;
-    printf("Entry point: %lx\n", *entry_point);
+    // printf("Entry point: %lx\n", *entry_point);
+    
     // Read in the program headers
     Elf64_Phdr phdrs[ehdr.e_phnum];
     lseek(fd, ehdr.e_phoff, SEEK_SET);
