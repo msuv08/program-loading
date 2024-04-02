@@ -2,7 +2,10 @@ CC=gcc
 CFLAGS=-g -static
 BINARY_ADDR_SPACE=-Wl,-Ttext-segment=0xff0000
 
-all: apager dpager hello_world
+# List of test programs
+TESTS = hello_world simple_math memory_alloc file_operations string_manipulation prime_numbers
+
+all: apager dpager tests
 
 apager: apager.c
 	$(CC) $(CFLAGS) apager.c -o apager
@@ -10,8 +13,11 @@ apager: apager.c
 dpager: dpager.c
 	$(CC) $(CFLAGS) dpager.c -o dpager
 
-hello_world: hello_world.c
-	$(CC) $(CFLAGS) $(BINARY_ADDR_SPACE) hello_world.c -o hello_world
+tests: $(TESTS)
+
+# Compile test programs
+$(TESTS): %: %.c
+	$(CC) $(CFLAGS) $(BINARY_ADDR_SPACE) $< -o $@
 
 clean:
-	rm -f apager dpager hello_world
+	rm -f apager dpager $(TESTS)
